@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>状态机一致性实验室</title>
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --ink:#e7ecf5; --muted:#9aa7bd; --accent:#6ea8fe; --bad:#ff6b6b; --ok:#48d597; --warn:#ffd166; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:28px 32px 16px; border-bottom:1px solid #232d42; }
+  h1 { margin:0 0 4px; font-size:24px; }
+  header p { margin:0; color:var(--muted); }
+  main { padding:24px 32px 64px; max-width:1180px; margin:0 auto; display:grid; gap:20px; }
+  section { background:var(--panel); border:1px solid #243049; border-radius:12px; padding:18px 20px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 9px; border-bottom:1px solid #243049; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  pre { background:#0b101c; border:1px solid #222c42; border-radius:8px; padding:12px; overflow:auto; max-height:340px; }
+  .pill { display:inline-block; padding:1px 9px; border-radius:999px; font-size:12px; }
+  .pill.bad { background:rgba(255,107,107,.15); color:var(--bad); }
+  .pill.ok { background:rgba(72,213,151,.15); color:var(--ok); }
+  .pill.warn { background:rgba(255,209,102,.15); color:var(--warn); }
+  .muted { color:var(--muted); }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  textarea { width:100%; min-height:220px; background:#0b101c; color:var(--ink); border:1px solid #222c42; border-radius:8px; padding:10px; font:12px ui-monospace,monospace; }
+  input[type=text] { background:#0b101c; color:var(--ink); border:1px solid #222c42; border-radius:6px; padding:6px 8px; }
+  button { background:var(--accent); color:#08111f; border:0; border-radius:7px; padding:7px 14px; font-weight:600; cursor:pointer; }
+  button.secondary { background:#2b3a57; color:var(--ink); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+  .banner { padding:9px 12px; border-radius:8px; margin:8px 0; display:none; }
+  .banner.err { background:rgba(255,107,107,.12); border:1px solid rgba(255,107,107,.4); color:#ffb3b3; }
+  .banner.ok2 { background:rgba(72,213,151,.12); border:1px solid rgba(72,213,151,.4); color:#bff5de; }
+  .big { font-size:20px; font-weight:700; }
+  .arrow { color:var(--muted); margin:0 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>状态机一致性实验室</h1>
+  <p>同一份声明验证事件轨迹、服务响应与并发交错 · 定义版本不可变 · SQLite 持久化 · 崩溃恢复</p>
+</header>
+<main>
+  <section>
+    <h2>内置示例：六步失败轨迹 → 两步反例</h2>
+    <div id="seedSummary" class="muted">加载中…</div>
+    <div id="seedComparison"></div>
+    <div style="margin-top:14px;">
+      <span class="big" id="origSize">6</span> 步 <span class="arrow">→</span>
+      <span class="big" id="reducedSize">2</span> 步
+      <span class="muted" id="reducedEvents"></span>
+    </div>
+    <div id="seedDivergence" style="margin-top:10px;"></div>
+    <h3 style="font-size:13px;color:var(--muted);margin:16px 0 6px;">缩减尝试记录（确定性）</h3>
+    <table id="attempts"><thead><tr><th>#</th><th>尝试删除</th><th>保留索引</th><th>判定</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>已保存的定义与运行</h2>
+    <table id="defs"><thead><tr><th>名称</th><th>版本</th><th>状态</th><th>修订</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>两个页面并发修改 draft：版本冲突保护</h2>
+    <p class="muted">两个编辑器加载同一个 draft 的同一修订；先保存成功并推进修订号，后保存的一方收到 409 冲突，必须刷新基线后才能提交。</p>
+    <div class="grid2">
+      <div>
+        <div class="row">定义 <input type="text" id="draftName" value="draft-demo" style="width:150px"/>
+          <button class="secondary" onclick="loadDraft()">加载/新建草稿</button></div>
+        <div class="muted" id="draftMeta"></div>
+        <textarea id="editorA"></textarea>
+        <div class="row"><button onclick="save('A')">页面 A 保存</button><span id="bannerA" class="banner"></span></div>
+      </div>
+      <div>
+        <div class="muted" id="draftMetaB"></div>
+        <textarea id="editorB"></textarea>
+        <div class="row"><button onclick="save('B')">页面 B 保存</button><span id="bannerB" class="banner"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>JSON API</h2>
+    <pre class="muted">POST /api/definitions                      创建 draft
+POST /api/definitions/{name}/versions      已发布定义不可改，只能建新版本
+PUT  /api/definitions/{name}/versions/{v}/draft   body: {expectedRevision, body}
+POST /api/definitions/{name}/versions/{v}/publish
+POST /api/runs                             {definition, version?, idempotencyKey?, initialState?, events, externalResponses?}
+GET  /api/runs/by-key/{key}        按幂等键查询
+GET  /api/runs/{id}/comparison             第一处分歧（mismatch / timeout / missing_response / extra_response）
+GET  /api/runs/{id}/reduce                 确定性反例缩减与每次尝试
+POST /api/interleavings                    {parties:[[event...],...], limit}
+POST /api/commutativity                    声明可交换的事件对两个顺序都要达到相同状态与输出集合</pre>
+  </section>
+</main>
+<script>
+async function jget(u){ const r=await fetch(u); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+async function jsend(u, method, body){
+  const r=await fetch(u,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const text=await r.text(); let data; try{data=text?JSON.parse(text):null;}catch(e){data=text;}
+  if(!r.ok) throw Object.assign(new Error(data&&data.error||r.statusText),{status:r.status,data});
+  return data;
+}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function pill(cls,t){return '<span class="pill '+cls+'">'+esc(t)+'</span>';}
+
+async function seed(){
+  const defs=await jget('/api/definitions');
+  document.querySelector('#defs tbody').innerHTML=defs.map(d=>
+    `<tr><td>${esc(d.name)}</td><td>${d.version}</td><td>${d.status==='published'?pill('ok','published'):pill('warn','draft')}</td><td>${d.revision}</td></tr>`
+  ).join('');
+
+  const run=await jget('/api/runs/by-key/seed-six-step').catch(()=>null);
+  if(!run) return;
+  document.getElementById('seedSummary').textContent =
+    `运行 ${run.id} 绑定定义 ${run.definition}@${run.version}，动作执行 ${run.actionInvocations} 次，共 ${run.steps.length} 步`;
+  const cmp=await jget('/api/runs/'+run.id+'/comparison');
+  const box=document.getElementById('seedComparison');
+  box.innerHTML = cmp.matches ? pill('ok','一致') :
+    pill('bad','分歧 @step '+cmp.divergence.stepIndex+' · '+cmp.divergence.type)+
+    ' <span class="muted">'+esc(cmp.divergence.message)+'</span>';
+  const red=await jget('/api/runs/'+run.id+'/reduce');
+  document.getElementById('origSize').textContent=red.originalSize;
+  document.getElementById('reducedSize').textContent=red.reducedSize;
+  document.getElementById('reducedEvents').textContent =
+    '事件: '+red.reducedSteps.map(s=>s.event.name).join(' , ');
+  document.getElementById('seedDivergence').innerHTML =
+    pill('bad',red.divergence.type)+' <code>'+esc(red.divergence.message)+'</code>';
+  document.querySelector('#attempts tbody').innerHTML = red.attempts.map(a=>
+    `<tr><td>${a.attempt}</td><td>${a.removedCandidate}</td><td>[${a.keptIndices.join(', ')}]</td>
+     <td>${a.verdict==='removed'?pill('ok','仍分歧 → 删除'):pill('warn','分歧消失 → 保留')}</td></tr>`
+  ).join('');
+}
+
+let draftBase = { version:null, revision:null };
+const DEMO_BODY = {
+  title:'并发编辑演示',
+  initial:{phase:'idle'},
+  illegal:'reject',
+  events:{ ping:{ output:{note:'pong'} } }
+};
+async function loadDraft(){
+  const name=document.getElementById('draftName').value.trim();
+  let detail;
+  try { detail=await jget('/api/definitions/'+encodeURIComponent(name)); }
+  catch(e){
+    detail=await jsend('/api/definitions','POST',{name, body:DEMO_BODY});
+  }
+  if(detail.status==='published'){
+    detail=await jsend('/api/definitions/'+encodeURIComponent(name)+'/versions','POST',{body:detail.body});
+  }
+  draftBase={version:detail.version,revision:detail.revision};
+  const text=JSON.stringify(detail.body,null,2);
+  editorA.value=text; editorB.value=text;
+  draftMeta.textContent='页面 A 基线：v'+detail.version+' revision '+detail.revision;
+  draftMetaB.textContent='页面 B 基线：v'+detail.version+' revision '+detail.revision;
+}
+function banner(id,cls,msg){
+  const el=document.getElementById('banner'+id);
+  el.style.display='block'; el.className='banner '+cls; el.textContent=msg;
+}
+async function save(which){
+  const name=document.getElementById('draftName').value.trim();
+  const body=JSON.parse(which==='A'?editorA.value:editorB.value);
+  try{
+    const updated=await jsend(
+      '/api/definitions/'+encodeURIComponent(name)+'/versions/'+draftBase.version+'/draft',
+      'PUT',{expectedRevision:draftBase.revision, body});
+    banner(which,'ok2','保存成功，新 revision '+updated.revision);
+    draftBase.revision=updated.revision;
+    draftMeta.textContent='页面 A 基线：v'+updated.version+' revision '+updated.revision;
+    draftMetaB.textContent='页面 B 基线（过期）：revision '+(updated.revision-1);
+  }catch(e){
+    if(e.status===409){ banner(which,'err','版本冲突：'+(e.data&&e.data.error||e.message)+'，请重新加载草稿'); }
+    else { banner(which,'err','保存失败：'+e.message); }
+  }
+}
+seed().catch(e=>{document.getElementById('seedSummary').textContent='种子数据加载失败: '+e.message;});
+</script>
+</body>
+</html>
